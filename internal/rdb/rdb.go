@@ -1343,12 +1343,12 @@ local skey = "asynq:servers:"..KEYS[1]
 redis.call("SETEX", skey, ARGV[1], ARGV[2])
 
 for i = 3, table.getn(ARGV)-1, 3 do
-	local wkey = "asynq:"..ARGV[i]..":servers:"..KEYS[1]
+	local wkey = "asynq:{"..ARGV[i].."}:workers:"..KEYS[1]
 	redis.call("DEL", wkey)
 end
 
 for i = 3, table.getn(ARGV)-1, 3 do
-	local wkey = "asynq:"..ARGV[i]..":servers:"..KEYS[1]
+	local wkey = "asynq:{"..ARGV[i].."}:workers:"..KEYS[1]
 	redis.call("HSET", wkey, ARGV[i+1], ARGV[i+2])
 	redis.call("EXPIRE", wkey, ARGV[1])
 end
