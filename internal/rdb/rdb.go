@@ -1332,25 +1332,32 @@ func (r *RDB) ExtendLease(qname string, ids ...string) (expirationTime time.Time
 	return expireAt, nil
 }
 
-// KEYS[1]  -> asynq:servers:{<host:pid:sid>}
-// KEYS[2]  -> asynq:workers:{<host:pid:sid>}
+// KEYS[1]  -> {<host:pid:sid>}
 // ARGV[1]  -> TTL in seconds
 // ARGV[2]  -> server info
-// ARGV[3:] -> alternate key-value pair of (worker id, worker data)
+// ARGV[3:] -> alternate key-value pair of (queue, worker id, worker data)
 // Note: Add key to ZSET with expiration time as score.
 // ref: https://github.com/antirez/redis/issues/135#issuecomment-2361996
 var writeServerStateCmd = redis.NewScript(`
-redis.call("SETEX", KEYS[1], ARGV[1], ARGV[2])
-redis.call("DEL", KEYS[2])
-for i = 3, table.getn(ARGV)-1, 2 do
-	redis.call("HSET", KEYS[2], ARGV[i], ARGV[i+1])
+local skey = "asynq:servers:"..KEYS[1]
+redis.call("SETEX", skey, ARGV[1], ARGV[2])
+
+for i = 3, table.getn(ARGV)-1, 3 do
+	local wkey = "asynq:"..ARGV[i]..":servers:"..KEYS[1]
+	redis.call("DEL", wkey)
 end
-redis.call("EXPIRE", KEYS[2], ARGV[1])
+
+for i = 3, table.getn(ARGV)-1, 3 do
+	local wkey = "asynq:"..ARGV[i]..":servers:"..KEYS[1]
+	redis.call("HSET", wkey, ARGV[i+1], ARGV[i+2])
+	redis.call("EXPIRE", wkey, ARGV[1])
+end
 return redis.status_reply("OK")`)
 
 // WriteServerState writes server state data to redis with expiration set to the value ttl.
 func (r *RDB) WriteServerState(info *base.ServerInfo, workers []*base.WorkerInfo, ttl time.Duration) error {
 	var op errors.Op = "rdb.WriteServerState"
+	queues := make(map[string]struct{})
 	ctx := context.Background()
 	bytes, err := base.EncodeServerInfo(info)
 	if err != nil {
@@ -1359,43 +1366,49 @@ func (r *RDB) WriteServerState(info *base.ServerInfo, workers []*base.WorkerInfo
 	exp := r.clock.Now().Add(ttl).UTC()
 	args := []interface{}{ttl.Seconds(), bytes} // args to the lua script
 	for _, w := range workers {
+		queues[w.Queue] = struct{}{}
 		bytes, err := base.EncodeWorkerInfo(w)
 		if err != nil {
 			continue // skip bad data
 		}
-		args = append(args, w.ID, bytes)
+		args = append(args, w.Queue, w.ID, bytes)
 	}
 	skey := base.ServerInfoKey(info.Host, info.PID, info.ServerID)
-	wkey := base.WorkersKey(info.Host, info.PID, info.ServerID)
+
+	suffix := fmt.Sprintf("{%s:%d:%s}", info.Host, info.PID, info.ServerID)
+
+
 	if err := r.client.ZAdd(ctx, base.AllServers, &redis.Z{Score: float64(exp.Unix()), Member: skey}).Err(); err != nil {
 		return errors.E(op, errors.Unknown, &errors.RedisCommandError{Command: "sadd", Err: err})
 	}
-	if err := r.client.ZAdd(ctx, base.AllWorkers, &redis.Z{Score: float64(exp.Unix()), Member: wkey}).Err(); err != nil {
-		return errors.E(op, errors.Unknown, &errors.RedisCommandError{Command: "zadd", Err: err})
+	for queue := range queues {
+		if err := r.client.ZAdd(ctx, base.AllWorkers, &redis.Z{Score: float64(exp.Unix()), Member: fmt.Sprintf("asynq:%s:workers:%s", queue, suffix)}).Err(); err != nil {
+			return errors.E(op, errors.Unknown, &errors.RedisCommandError{Command: "zadd", Err: err})
+		}
 	}
-	return r.runScript(ctx, op, writeServerStateCmd, []string{skey, wkey}, args...)
+	return r.runScript(ctx, op, writeServerStateCmd, []string{suffix}, args...)
 }
 
-// KEYS[1] -> asynq:servers:{<host:pid:sid>}
-// KEYS[2] -> asynq:workers:{<host:pid:sid>}
+// KEYS[1] -> {<host:pid:sid>}
 var clearServerStateCmd = redis.NewScript(`
-redis.call("DEL", KEYS[1])
-redis.call("DEL", KEYS[2])
+local skey = "asynq:servers:"..KEYS[1]
+redis.call("ZREM", "asynq:servers", skey)
+redis.call('DEL', skey)
+
+local res = redis.call("KEYS", "asynq:*:"..KEYS[1])
+local dels = 0
+for _,wkey in ipairs(res) do
+	redis.call("ZREM", "asynq:workers", wkey)
+	redis.call('DEL', wkey)
+end
 return redis.status_reply("OK")`)
 
 // ClearServerState deletes server state data from redis.
 func (r *RDB) ClearServerState(host string, pid int, serverID string) error {
 	var op errors.Op = "rdb.ClearServerState"
 	ctx := context.Background()
-	skey := base.ServerInfoKey(host, pid, serverID)
-	wkey := base.WorkersKey(host, pid, serverID)
-	if err := r.client.ZRem(ctx, base.AllServers, skey).Err(); err != nil {
-		return errors.E(op, errors.Internal, &errors.RedisCommandError{Command: "zrem", Err: err})
-	}
-	if err := r.client.ZRem(ctx, base.AllWorkers, wkey).Err(); err != nil {
-		return errors.E(op, errors.Internal, &errors.RedisCommandError{Command: "zrem", Err: err})
-	}
-	return r.runScript(ctx, op, clearServerStateCmd, []string{skey, wkey})
+	suffix := fmt.Sprintf("{%s:%d:%s}", host, pid, serverID)
+	return r.runScript(ctx, op, clearServerStateCmd, []string{suffix})
 }
 
 // KEYS[1]  -> asynq:schedulers:{<schedulerID>}
