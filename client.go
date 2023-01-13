@@ -49,6 +49,7 @@ const (
 	TaskIDOpt
 	RetentionOpt
 	GroupOpt
+	CompressOpt
 )
 
 // Option specifies the task processing behavior.
@@ -75,6 +76,7 @@ type (
 	processInOption time.Duration
 	retentionOption time.Duration
 	groupOption     string
+	compressOption  bool
 )
 
 // MaxRetry returns an option to specify the max number of times
@@ -206,6 +208,15 @@ func (name groupOption) String() string     { return fmt.Sprintf("Group(%q)", st
 func (name groupOption) Type() OptionType   { return GroupOpt }
 func (name groupOption) Value() interface{} { return string(name) }
 
+// Compress returns an option to specify whether the payload should be compressed.
+func Compress(compress bool) Option {
+	return compressOption(compress)
+}
+
+func (compress compressOption) String() string     { return fmt.Sprintf("Queue(%v)", bool(compress)) }
+func (compress compressOption) Type() OptionType   { return CompressOpt }
+func (compress compressOption) Value() interface{} { return  bool(compress) }
+
 // ErrDuplicateTask indicates that the given task could not be enqueued since it's a duplicate of another task.
 //
 // ErrDuplicateTask error only applies to tasks enqueued with a Unique option.
@@ -226,6 +237,7 @@ type option struct {
 	processAt time.Time
 	retention time.Duration
 	group     string
+	compress  bool
 }
 
 // composeOptions merges user provided options into the default options
@@ -279,6 +291,8 @@ func composeOptions(opts ...Option) (option, error) {
 				return option{}, errors.New("group key cannot be empty")
 			}
 			res.group = key
+		case compressOption:
+			res.compress = bool(opt)
 		default:
 			// ignore unexpected option
 		}
@@ -367,10 +381,15 @@ func (c *Client) EnqueueContext(ctx context.Context, task *Task, opts ...Option)
 	if opt.uniqueTTL > 0 {
 		uniqueKey = base.UniqueKey(opt.queue, task.Type(), task.Payload())
 	}
+	taskPayload := task.Payload()
+	// compress payload
+	if opt.compress {
+		taskPayload = base.DoZlibCompress(taskPayload)
+	}
 	msg := &base.TaskMessage{
 		ID:        opt.taskID,
 		Type:      task.Type(),
-		Payload:   task.Payload(),
+		Payload:   taskPayload,
 		Queue:     opt.queue,
 		Retry:     opt.retry,
 		Deadline:  deadline.Unix(),
@@ -378,6 +397,7 @@ func (c *Client) EnqueueContext(ctx context.Context, task *Task, opts ...Option)
 		UniqueKey: uniqueKey,
 		GroupKey:  opt.group,
 		Retention: int64(opt.retention.Seconds()),
+		Compress:  opt.compress,
 	}
 	now := time.Now()
 	var state base.TaskState

@@ -6,10 +6,13 @@
 package base
 
 import (
+	"bytes"
+	"compress/zlib"
 	"context"
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"time"
@@ -294,6 +297,9 @@ type TaskMessage struct {
 	//
 	// Use zero to indicate no value.
 	CompletedAt int64
+
+	// whether the payload is compressed(zlib)
+	Compress bool
 }
 
 // EncodeMessage marshals the given task message and returns an encoded bytes.
@@ -316,6 +322,7 @@ func EncodeMessage(msg *TaskMessage) ([]byte, error) {
 		GroupKey:     msg.GroupKey,
 		Retention:    msg.Retention,
 		CompletedAt:  msg.CompletedAt,
+		Compress:     &msg.Compress,
 	})
 }
 
@@ -340,6 +347,7 @@ func DecodeMessage(data []byte) (*TaskMessage, error) {
 		GroupKey:     pbmsg.GetGroupKey(),
 		Retention:    pbmsg.GetRetention(),
 		CompletedAt:  pbmsg.GetCompletedAt(),
+		Compress:     pbmsg.GetCompress(),
 	}, nil
 }
 
@@ -752,4 +760,22 @@ type Broker interface {
 	PublishCancelation(id string) error
 
 	WriteResult(qname, id string, data []byte) (n int, err error)
+}
+
+// DoZlibCompress zlib compress
+func DoZlibCompress(src []byte) []byte {
+    var in bytes.Buffer
+    w := zlib.NewWriter(&in)
+    w.Write(src)
+    w.Close()
+    return in.Bytes()
+}
+
+// DoZlibUnCompress zlib decompress
+func DoZlibUnCompress(compressSrc []byte) []byte {
+    b := bytes.NewReader(compressSrc)
+    var out bytes.Buffer
+    r, _ := zlib.NewReader(b)
+    io.Copy(&out, r)
+    return out.Bytes()
 }

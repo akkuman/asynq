@@ -11,7 +11,7 @@ option go_package = "github.com/hibiken/asynq/internal/proto";
 
 // TaskMessage is the internal representation of a task with additional
 // metadata fields.
-// Next ID: 15
+// Next ID: 16
 message TaskMessage {
 	// Type indicates the kind of the task to be performed.
   string type = 1;
@@ -65,6 +65,9 @@ message TaskMessage {
   // the number of seconds elapsed since January 1, 1970 UTC.
   // This field is populated if result_ttl > 0 upon completion.
   int64 completed_at = 13;
+
+  // whether the payload is compressed(zlib)
+  optional bool compress = 15;
 };
 
 // ServerInfo holds information about a running server.
