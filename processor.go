@@ -21,6 +21,7 @@ import (
 	"github.com/hibiken/asynq/internal/errors"
 	"github.com/hibiken/asynq/internal/log"
 	"github.com/hibiken/asynq/internal/timeutil"
+	"github.com/shirou/gopsutil/mem"
 	"golang.org/x/time/rate"
 )
 
@@ -170,6 +171,15 @@ func (p *processor) exec() {
 	case <-p.quit:
 		return
 	case p.sema <- struct{}{}: // acquire token
+		for {
+			v, _ := mem.VirtualMemory()
+			if v.UsedPercent >= 0.8 {
+				p.logger.Warn("The current memory usage has exceeded 80%, suspend receiving tasks")
+				time.Sleep(5 * time.Second)
+				continue
+			}
+			break
+		}
 		qnames := p.queues()
 		msg, leaseExpirationTime, err := p.broker.Dequeue(qnames...)
 		switch {
