@@ -173,7 +173,7 @@ func (p *processor) exec() {
 	case p.sema <- struct{}{}: // acquire token
 		for {
 			v, _ := mem.VirtualMemory()
-			if v.UsedPercent >= 0.8 {
+			if v.UsedPercent >= 80 {
 				p.logger.Warn("The current memory usage has exceeded 80%, suspend receiving tasks")
 				time.Sleep(5 * time.Second)
 				continue
