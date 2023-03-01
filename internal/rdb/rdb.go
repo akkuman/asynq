@@ -1386,8 +1386,10 @@ func (r *RDB) WriteServerState(info *base.ServerInfo, workers []*base.WorkerInfo
 	for _, wkey := range wkeys {
 		zList = append(zList, &redis.Z{Score: float64(exp.Unix()), Member: wkey})
 	}
-	if err := r.client.ZAdd(ctx, base.AllWorkers, zList...).Err(); err != nil {
-		return errors.E(op, errors.Unknown, &errors.RedisCommandError{Command: "zadd", Err: err})
+	if len(zList) > 0 {
+		if err := r.client.ZAdd(ctx, base.AllWorkers, zList...).Err(); err != nil {
+			return errors.E(op, errors.Unknown, &errors.RedisCommandError{Command: "zadd", Err: err})
+		}
 	}
 	keys := []string{skey}
 	keys = append(keys, wkeys...)
