@@ -1332,33 +1332,30 @@ func (r *RDB) ExtendLease(qname string, ids ...string) (expirationTime time.Time
 	return expireAt, nil
 }
 
-// KEYS[1]  -> asynq:{queue}
+// KEYS[1]  -> asynq:servers:{hostname:pid:sid}
+// KEYS[2:] -> "asynq:{queue}:workers:{hostname:pid:sid}", ...
 // ARGV[1]  -> TTL in seconds
 // ARGV[2]  -> server info
-// ARGV[3] -> {<host:pid:sid>}
-// ARGV[4:] -> alternate key-value pair of (queue, worker id, worker data)
+// ARGV[3:] -> alternate key-value pair of (worker id, worker data)
 // Note: Add key to ZSET with expiration time as score.
 // ref: https://github.com/antirez/redis/issues/135#issuecomment-2361996
 var writeServerStateCmd = redis.NewScript(`
-local skey = "asynq:servers:"..ARGV[3]
-redis.call("SETEX", skey, ARGV[1], ARGV[2])
+redis.call("SETEX", KEYS[1], ARGV[1], ARGV[2])
 
-for i = 4, table.getn(ARGV)-1, 3 do
-	local wkey = "asynq:{"..ARGV[i].."}:workers:"..ARGV[3]
-	redis.call("DEL", wkey)
+for i = 2, table.getn(KEYS)-1, 1 do
+	redis.call("DEL", KEYS[i])
 end
 
-for i = 4, table.getn(ARGV)-1, 3 do
-	local wkey = "asynq:{"..ARGV[i].."}:workers:"..ARGV[3]
-	redis.call("HSET", wkey, ARGV[i+1], ARGV[i+2])
+for i = 2, table.getn(KEYS)-1, 1 do
+	redis.call("HSET", wkey, ARGV[i*2-1], ARGV[i*2])
 	redis.call("EXPIRE", wkey, ARGV[1])
 end
+
 return redis.status_reply("OK")`)
 
 // WriteServerState writes server state data to redis with expiration set to the value ttl.
 func (r *RDB) WriteServerState(info *base.ServerInfo, workers []*base.WorkerInfo, ttl time.Duration) error {
 	var op errors.Op = "rdb.WriteServerState"
-	queues := make(map[string]struct{})
 	ctx := context.Background()
 	suffix := fmt.Sprintf("{%s:%d:%s}", info.Host, info.PID, info.ServerID)
 
@@ -1367,45 +1364,50 @@ func (r *RDB) WriteServerState(info *base.ServerInfo, workers []*base.WorkerInfo
 		return errors.E(op, errors.Internal, fmt.Sprintf("cannot encode server info: %v", err))
 	}
 	exp := r.clock.Now().Add(ttl).UTC()
-	args := []interface{}{ttl.Seconds(), bytes, suffix} // args to the lua script
+	args := []interface{}{ttl.Seconds(), bytes} // args to the lua script
+	wkeys := make([]string, 0)
+
 	for _, w := range workers {
-		queues[w.Queue] = struct{}{}
 		bytes, err := base.EncodeWorkerInfo(w)
 		if err != nil {
 			continue // skip bad data
 		}
-		args = append(args, w.Queue, w.ID, bytes)
+		wkey := fmt.Sprintf("asynq:{%s}:workers:%s", w.Queue, suffix)
+		wkeys = append(wkeys, wkey)
+		args = append(args, w.ID, bytes)
 	}
 	skey := base.ServerInfoKey(info.Host, info.PID, info.ServerID)
 
 	if err := r.client.ZAdd(ctx, base.AllServers, &redis.Z{Score: float64(exp.Unix()), Member: skey}).Err(); err != nil {
 		return errors.E(op, errors.Unknown, &errors.RedisCommandError{Command: "sadd", Err: err})
 	}
-	var keys []string
-	for queue := range queues {
-		prefix := fmt.Sprintf("asynq:{%s}", queue)
-		keys = append(keys, prefix)
-		wkey := fmt.Sprintf("%s:workers:%s", prefix, suffix)
-		if err := r.client.ZAdd(ctx, base.AllWorkers, &redis.Z{Score: float64(exp.Unix()), Member: wkey}).Err(); err != nil {
-			return errors.E(op, errors.Unknown, &errors.RedisCommandError{Command: "zadd", Err: err})
-		}
+	// 将所有worker注册到 base.AllWorkers 键上
+	var zList []*redis.Z
+	for wkey := range wkeys {
+		zList = append(zList, &redis.Z{Score: float64(exp.Unix()), Member: wkey})
 	}
+	if err := r.client.ZAdd(ctx, base.AllWorkers, zList...).Err(); err != nil {
+		return errors.E(op, errors.Unknown, &errors.RedisCommandError{Command: "zadd", Err: err})
+	}
+	keys := []string{skey}
+	keys = append(keys, wkeys...)
 	return r.runScript(ctx, op, writeServerStateCmd, keys, args...)
 }
 
-// KEYS[1] -> asynq:servers:{<host:pid:sid>}
+// KEYS[1] -> asynq:workers
+// KEYS[2] -> asynq:servers:{<host:pid:sid>}
 // ARGV[1] -> {<host:pid:sid>}
 var clearServerStateCmd = redis.NewScript(`
-redis.call("ZREM", "asynq:servers", KEYS[1])
-redis.call("DEL", KEYS[1])
+redis.call("ZREM", "asynq:servers", KEYS[2])
+redis.call("DEL", KEYS[2])
 local res = redis.call("KEYS", "asynq:*:"..ARGV[1])
 for _, wkey in ipairs(res) do
 	redis.call('DEL', wkey)
 end
-local res = redis.call("ZRANGE", "asynq:workers", 0, -1)
+local res = redis.call("ZRANGE", KEYS[1], 0, -1)
 for _, worker in ipairs(res) do
 	if (string.sub(worker,-string.len(ARGV[1]))==ARGV[1]) then
-		redis.call("ZREM", "asynq:workers", worker)
+		redis.call("ZREM", KEYS[1], worker)
 	end
 end
 return redis.status_reply("OK")`)
@@ -1416,7 +1418,7 @@ func (r *RDB) ClearServerState(host string, pid int, serverID string) error {
 	ctx := context.Background()
 	skey := base.ServerInfoKey(host, pid, serverID)
 	suffix := fmt.Sprintf("{%s:%d:%s}", host, pid, serverID)
-	return r.runScript(ctx, op, clearServerStateCmd, []string{skey}, suffix)
+	return r.runScript(ctx, op, clearServerStateCmd, []string{base.AllWorkers, skey}, suffix)
 }
 
 // KEYS[1]  -> asynq:schedulers:{<schedulerID>}
