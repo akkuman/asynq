@@ -1383,7 +1383,7 @@ func (r *RDB) WriteServerState(info *base.ServerInfo, workers []*base.WorkerInfo
 	}
 	// 将所有worker注册到 base.AllWorkers 键上
 	var zList []*redis.Z
-	for wkey := range wkeys {
+	for _, wkey := range wkeys {
 		zList = append(zList, &redis.Z{Score: float64(exp.Unix()), Member: wkey})
 	}
 	if err := r.client.ZAdd(ctx, base.AllWorkers, zList...).Err(); err != nil {
