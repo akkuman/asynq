@@ -215,7 +215,7 @@ func Compress(compress bool) Option {
 
 func (compress compressOption) String() string     { return fmt.Sprintf("Queue(%v)", bool(compress)) }
 func (compress compressOption) Type() OptionType   { return CompressOpt }
-func (compress compressOption) Value() interface{} { return  bool(compress) }
+func (compress compressOption) Value() interface{} { return bool(compress) }
 
 // ErrDuplicateTask indicates that the given task could not be enqueued since it's a duplicate of another task.
 //
@@ -381,15 +381,10 @@ func (c *Client) EnqueueContext(ctx context.Context, task *Task, opts ...Option)
 	if opt.uniqueTTL > 0 {
 		uniqueKey = base.UniqueKey(opt.queue, task.Type(), task.Payload())
 	}
-	taskPayload := task.Payload()
-	// compress payload
-	if opt.compress {
-		taskPayload = base.DoZlibCompress(taskPayload)
-	}
 	msg := &base.TaskMessage{
 		ID:        opt.taskID,
 		Type:      task.Type(),
-		Payload:   taskPayload,
+		Payload:   task.Payload(),
 		Queue:     opt.queue,
 		Retry:     opt.retry,
 		Deadline:  deadline.Unix(),

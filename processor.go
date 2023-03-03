@@ -237,10 +237,6 @@ func (p *processor) exec() {
 						ctx:    ctx,
 					},
 				)
-				// decompress the message
-				if msg.Compress {
-					task.payload = base.DoZlibUnCompress(task.payload)
-				}
 				resCh <- p.perform(ctx, task)
 			}()
 

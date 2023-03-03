@@ -307,9 +307,14 @@ func EncodeMessage(msg *TaskMessage) ([]byte, error) {
 	if msg == nil {
 		return nil, fmt.Errorf("cannot encode nil message")
 	}
+	// compress payload
+	taskPayload := msg.Payload
+	if msg.Compress {
+		taskPayload = DoZlibCompress(taskPayload)
+	}
 	return proto.Marshal(&pb.TaskMessage{
 		Type:         msg.Type,
-		Payload:      msg.Payload,
+		Payload:      taskPayload,
 		Id:           msg.ID,
 		Queue:        msg.Queue,
 		Retry:        int32(msg.Retry),
@@ -332,9 +337,14 @@ func DecodeMessage(data []byte) (*TaskMessage, error) {
 	if err := proto.Unmarshal(data, &pbmsg); err != nil {
 		return nil, err
 	}
+	// decompress the message
+	taskPayload := pbmsg.GetPayload()
+	if pbmsg.GetCompress() {
+		taskPayload = DoZlibUnCompress(taskPayload)
+	}
 	return &TaskMessage{
 		Type:         pbmsg.GetType(),
-		Payload:      pbmsg.GetPayload(),
+		Payload:      taskPayload,
 		ID:           pbmsg.GetId(),
 		Queue:        pbmsg.GetQueue(),
 		Retry:        int(pbmsg.GetRetry()),
@@ -764,18 +774,18 @@ type Broker interface {
 
 // DoZlibCompress zlib compress
 func DoZlibCompress(src []byte) []byte {
-    var in bytes.Buffer
-    w := zlib.NewWriter(&in)
-    w.Write(src)
-    w.Close()
-    return in.Bytes()
+	var in bytes.Buffer
+	w := zlib.NewWriter(&in)
+	w.Write(src)
+	w.Close()
+	return in.Bytes()
 }
 
 // DoZlibUnCompress zlib decompress
 func DoZlibUnCompress(compressSrc []byte) []byte {
-    b := bytes.NewReader(compressSrc)
-    var out bytes.Buffer
-    r, _ := zlib.NewReader(b)
-    io.Copy(&out, r)
-    return out.Bytes()
+	b := bytes.NewReader(compressSrc)
+	var out bytes.Buffer
+	r, _ := zlib.NewReader(b)
+	io.Copy(&out, r)
+	return out.Bytes()
 }
