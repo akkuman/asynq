@@ -1332,27 +1332,6 @@ func (r *RDB) ExtendLease(qname string, ids ...string) (expirationTime time.Time
 	return expireAt, nil
 }
 
-// KEYS[1]  -> asynq:servers:{hostname:pid:sid}
-// KEYS[2:] -> "asynq:{queue}:workers:{hostname:pid:sid}", ...
-// ARGV[1]  -> TTL in seconds
-// ARGV[2]  -> server info
-// ARGV[3:] -> alternate key-value pair of (worker id, worker data)
-// Note: Add key to ZSET with expiration time as score.
-// ref: https://github.com/antirez/redis/issues/135#issuecomment-2361996
-var writeServerStateCmd = redis.NewScript(`
-redis.call("SETEX", KEYS[1], ARGV[1], ARGV[2])
-
-for i = 2, table.getn(KEYS)-1, 1 do
-	redis.call("DEL", KEYS[i])
-end
-
-for i = 2, table.getn(KEYS)-1, 1 do
-	redis.call("HSET", wkey, ARGV[i*2-1], ARGV[i*2])
-	redis.call("EXPIRE", wkey, ARGV[1])
-end
-
-return redis.status_reply("OK")`)
-
 // WriteServerState writes server state data to redis with expiration set to the value ttl.
 func (r *RDB) WriteServerState(info *base.ServerInfo, workers []*base.WorkerInfo, ttl time.Duration) error {
 	var op errors.Op = "rdb.WriteServerState"
@@ -1364,22 +1343,32 @@ func (r *RDB) WriteServerState(info *base.ServerInfo, workers []*base.WorkerInfo
 		return errors.E(op, errors.Internal, fmt.Sprintf("cannot encode server info: %v", err))
 	}
 	exp := r.clock.Now().Add(ttl).UTC()
-	args := []interface{}{ttl.Seconds(), bytes} // args to the lua script
-	wkeys := make([]string, 0)
 
-	for _, w := range workers {
-		bytes, err := base.EncodeWorkerInfo(w)
-		if err != nil {
-			continue // skip bad data
-		}
-		wkey := fmt.Sprintf("asynq:{%s}:workers:%s", w.Queue, suffix)
-		wkeys = append(wkeys, wkey)
-		args = append(args, w.ID, bytes)
-	}
 	skey := base.ServerInfoKey(info.Host, info.PID, info.ServerID)
 
 	if err := r.client.ZAdd(ctx, base.AllServers, &redis.Z{Score: float64(exp.Unix()), Member: skey}).Err(); err != nil {
 		return errors.E(op, errors.Unknown, &errors.RedisCommandError{Command: "sadd", Err: err})
+	}
+	if err := r.client.SetEX(ctx, skey, bytes, time.Duration(ttl.Seconds())).Err(); err != nil {
+		return errors.E(op, errors.Unknown, &errors.RedisCommandError{Command: "setex", Err: err})
+	}
+	var wkeys []string
+	for _, w := range workers {
+		bs, err := base.EncodeWorkerInfo(w)
+		if err != nil {
+			continue // skip bad data
+		}
+		wkey := fmt.Sprintf("asynq:{%s}:workers:%s", w.Queue, suffix)
+
+		pipeClient := r.client.Pipeline()
+		pipeClient.Del(ctx, wkey)
+		pipeClient.HSet(ctx, wkey, w.ID, bs)
+		pipeClient.Expire(ctx, wkey, time.Duration(ttl.Seconds()))
+		_, err = pipeClient.Exec(ctx)
+		if err != nil {
+			return errors.E(op, errors.Internal, fmt.Sprintf("pipeline error: %v", err))
+		}
+		wkeys = append(wkeys, wkey)
 	}
 	// 将所有worker注册到 base.AllWorkers 键上
 	var zList []*redis.Z
@@ -1391,9 +1380,8 @@ func (r *RDB) WriteServerState(info *base.ServerInfo, workers []*base.WorkerInfo
 			return errors.E(op, errors.Unknown, &errors.RedisCommandError{Command: "zadd", Err: err})
 		}
 	}
-	keys := []string{skey}
-	keys = append(keys, wkeys...)
-	return r.runScript(ctx, op, writeServerStateCmd, keys, args...)
+
+	return nil
 }
 
 // KEYS[1] -> asynq:workers
