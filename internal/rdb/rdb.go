@@ -1385,15 +1385,8 @@ func (r *RDB) WriteServerState(info *base.ServerInfo, workers []*base.WorkerInfo
 }
 
 // KEYS[1] -> asynq:workers
-// KEYS[2] -> asynq:servers:{<host:pid:sid>}
 // ARGV[1] -> {<host:pid:sid>}
 var clearServerStateCmd = redis.NewScript(`
-redis.call("ZREM", "asynq:servers", KEYS[2])
-redis.call("DEL", KEYS[2])
-local res = redis.call("KEYS", "asynq:*:"..ARGV[1])
-for _, wkey in ipairs(res) do
-	redis.call('DEL', wkey)
-end
 local res = redis.call("ZRANGE", KEYS[1], 0, -1)
 for _, worker in ipairs(res) do
 	if (string.sub(worker,-string.len(ARGV[1]))==ARGV[1]) then
@@ -1408,6 +1401,24 @@ func (r *RDB) ClearServerState(host string, pid int, serverID string) error {
 	ctx := context.Background()
 	skey := base.ServerInfoKey(host, pid, serverID)
 	suffix := fmt.Sprintf("{%s:%d:%s}", host, pid, serverID)
+	// 删除服务节点信息
+	if err := r.client.ZRem(ctx, base.AllServers, skey).Err(); err != nil {
+		return errors.E(op, errors.Unknown, &errors.RedisCommandError{Command: "zrem", Err: err})
+	}
+	if err := r.client.Del(ctx, skey).Err(); err != nil {
+		return errors.E(op, errors.Unknown, &errors.RedisCommandError{Command: "del", Err: err})
+	}
+	// 删除节点所有worker信息
+	wkeys, err := r.client.Keys(ctx, fmt.Sprintf("asynq:*:%s", suffix)).Result()
+	if err != nil {
+		return errors.E(op, errors.Unknown, &errors.RedisCommandError{Command: "keys", Err: err})
+	}
+	for _, wkey := range wkeys {
+		if err := r.client.Del(ctx, wkey).Err(); err != nil {
+			return errors.E(op, errors.Unknown, &errors.RedisCommandError{Command: "del", Err: err})
+		}
+	}
+	// 从已注册的worker中删除该节点worker
 	return r.runScript(ctx, op, clearServerStateCmd, []string{base.AllWorkers, skey}, suffix)
 }
 
