@@ -1349,7 +1349,7 @@ func (r *RDB) WriteServerState(info *base.ServerInfo, workers []*base.WorkerInfo
 	if err := r.client.ZAdd(ctx, base.AllServers, &redis.Z{Score: float64(exp.Unix()), Member: skey}).Err(); err != nil {
 		return errors.E(op, errors.Unknown, &errors.RedisCommandError{Command: "sadd", Err: err})
 	}
-	if err := r.client.SetEX(ctx, skey, bytes, time.Duration(ttl.Seconds())).Err(); err != nil {
+	if err := r.client.SetEX(ctx, skey, bytes, ttl).Err(); err != nil {
 		return errors.E(op, errors.Unknown, &errors.RedisCommandError{Command: "setex", Err: err})
 	}
 	var wkeys []string
@@ -1363,7 +1363,7 @@ func (r *RDB) WriteServerState(info *base.ServerInfo, workers []*base.WorkerInfo
 		pipeClient := r.client.Pipeline()
 		pipeClient.Del(ctx, wkey)
 		pipeClient.HSet(ctx, wkey, w.ID, bs)
-		pipeClient.Expire(ctx, wkey, time.Duration(ttl.Seconds()))
+		pipeClient.Expire(ctx, wkey, ttl)
 		_, err = pipeClient.Exec(ctx)
 		if err != nil {
 			return errors.E(op, errors.Internal, fmt.Sprintf("pipeline error: %v", err))
