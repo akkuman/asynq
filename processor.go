@@ -175,6 +175,7 @@ func (p *processor) exec() {
 			v, _ := mem.VirtualMemory()
 			if v.UsedPercent >= 80 {
 				p.logger.Warn("The current memory usage has exceeded 80%, suspend receiving tasks")
+				runtime.GC()
 				time.Sleep(5 * time.Second)
 				continue
 			}
