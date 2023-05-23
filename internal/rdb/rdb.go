@@ -22,7 +22,7 @@ import (
 const statsTTL = 90 * 24 * time.Hour // 90 days
 
 // LeaseDuration is the duration used to initially create a lease and to extend it thereafter.
-const LeaseDuration = 30 * time.Second
+const LeaseDuration = 300 * time.Second
 
 // RDB is a client interface to query and mutate task queues.
 type RDB struct {
